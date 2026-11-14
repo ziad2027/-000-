@@ -1,0 +1,259 @@
+name: "Build Android Packages - Bank AlDam Qataba"
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android:
+    name: "Build AAB and APK with original release key"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Set up Java 21"
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: "Set up Node.js 22"
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: "Install dependencies"
+        run: npm install --legacy-peer-deps
+
+      - name: "Build web assets"
+        run: npm run build
+
+      - name: "Prepare Android platform and Firebase configuration"
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+          mkdir -p android/app
+          if [ -s "android/app/google-services.json" ]; then
+            echo "Using existing android/app/google-services.json"
+          elif [ -s "google-services.json" ]; then
+            cp google-services.json android/app/google-services.json
+            echo "Copied google-services.json from workspace root to android/app/"
+          else
+            echo "Auto-restoring official production google-services.json..."
+            node -e '
+              const fs = require("fs");
+              const config = {
+                project_info: {
+                  project_number: "303623115940",
+                  firebase_url: "https://a-drop-of-blood-saves-a-life-default-rtdb.firebaseio.com",
+                  project_id: "a-drop-of-blood-saves-a-life",
+                  storage_bucket: "a-drop-of-blood-saves-a-life.firebasestorage.app"
+                },
+                client: [
+                  {
+                    client_info: {
+                      mobilesdk_app_id: "1:303623115940:android:38b60cc4cd52e5ec6f8231",
+                      android_client_info: {
+                        package_name: "com.qatrahayat.app"
+                      }
+                    },
+                    oauth_client: [
+                      {
+                        client_id: "303623115940-3g8sjbf8g8tmjn7h2l2rkp14q73d7eh2.apps.googleusercontent.com",
+                        client_type: 1,
+                        android_info: {
+                          package_name: "com.qatrahayat.app",
+                          certificate_hash: "d14a722dfda8c6988f3dc4c63af0c77ecec76316"
+                        }
+                      },
+                      {
+                        client_id: "303623115940-2veemdmqto16oa6n2jeo16umdi6t3eoc.apps.googleusercontent.com",
+                        client_type: 3
+                      }
+                    ],
+                    api_key: [
+                      {
+                        current_key: "AIzaSyA3GJAyyHxvUYe0bp5rnA63vgki5GBQTdc"
+                      }
+                    ],
+                    services: {
+                      appinvite_service: {
+                        other_platform_oauth_client: [
+                          {
+                            client_id: "303623115940-2veemdmqto16oa6n2jeo16umdi6t3eoc.apps.googleusercontent.com",
+                            client_type: 3
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                configuration_version: "1"
+              };
+              fs.writeFileSync("android/app/google-services.json", JSON.stringify(config, null, 2) + "\n");
+            '
+            cp android/app/google-services.json google-services.json
+          fi
+
+      - name: "Verify Firebase Android configuration"
+        run: |
+          set -euo pipefail
+          CONFIG="android/app/google-services.json"
+          if [ ! -s "$CONFIG" ]; then
+            echo "::error::Missing $CONFIG. Restore the Firebase Android configuration."
+            exit 1
+          fi
+          node <<'NODE'
+          const fs = require('fs');
+          const config = JSON.parse(fs.readFileSync('android/app/google-services.json', 'utf8'));
+          const expectedProject = 'a-drop-of-blood-saves-a-life';
+          const expectedPackage = 'com.qatrahayat.app';
+          const packages = (config.client || []).map(
+            item => item.client_info?.android_client_info?.package_name
+          );
+          if (config.project_info?.project_id !== expectedProject) {
+            throw new Error('Firebase project_id does not match the production project.');
+          }
+          if (!packages.includes(expectedPackage)) {
+            throw new Error('google-services.json does not contain package ' + expectedPackage);
+          }
+          console.log('Firebase project and Android package verified: ' + expectedPackage);
+          NODE
+
+      - name: "Verify original release keystore"
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for secret_name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!secret_name:-}" ]; then
+              echo "::error::Missing GitHub Actions secret: ${secret_name}"
+              exit 1
+            fi
+          done
+
+          KEYSTORE_PATH="$GITHUB_WORKSPACE/android/app/release-keystore.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+
+          if [ ! -s "$KEYSTORE_PATH" ]; then
+            echo "::error::The decoded release keystore is empty."
+            exit 1
+          fi
+
+          if ! keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::Could not open the release keystore with the configured password and alias."
+            exit 1
+          fi
+
+          {
+            echo "KEYSTORE_FILE=$KEYSTORE_PATH"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "KEY_ALIAS=$KEY_ALIAS"
+            echo "KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+          mkdir -p release_files
+          keytool -list -v -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > cert_info.txt
+          SHA1_VAL=$(awk -F': ' '/SHA1:/{print $2; exit}' cert_info.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          SHA256_VAL=$(awk -F': ' '/SHA256:/{print $2; exit}' cert_info.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')
+
+          EXPECTED_SHA1="d14a722dfda8c6988f3dc4c63af0c77ecec76316"
+          EXPECTED_SHA256="9781c01d5f682a35a2d02936ce13f3fca8e88df53c5ade79fca0290f25ade0ba"
+
+          if [ -z "$SHA1_VAL" ] || [ -z "$SHA256_VAL" ]; then
+            echo "::error::Could not read the release certificate fingerprints."
+            exit 1
+          fi
+
+          if [ "$SHA1_VAL" != "$EXPECTED_SHA1" ] || [ "$SHA256_VAL" != "$EXPECTED_SHA256" ]; then
+            echo "::error::Keystore mismatch! Expected SHA1: ${EXPECTED_SHA1}, but got: ${SHA1_VAL}. Expected SHA256: ${EXPECTED_SHA256}, but got: ${SHA256_VAL}"
+            exit 1
+          fi
+
+          {
+            echo "Bank AlDam Qataba release certificate"
+            echo "Package ID: com.qatrahayat.app"
+            echo
+            echo "SHA-1: $SHA1_VAL"
+            echo "SHA-256: $SHA256_VAL"
+          } > release_files/CERTIFICATE_FINGERPRINTS.txt
+
+          rm -f cert_info.txt
+          echo "Original release keystore and both certificate fingerprints verified."
+
+      - name: "Build Google Play AAB"
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew bundleRelease --no-daemon
+          cd ..
+
+      - name: "Build release APK"
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon
+          cd ..
+
+      - name: "Collect release files"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release_files
+          AAB_FILE=$(find android/app/build/outputs/bundle -type f -name "*.aab" -print -quit)
+          APK_FILE=$(find android/app/build/outputs/apk -type f -name "*.apk" -print -quit)
+
+          if [ -z "$AAB_FILE" ] || [ -z "$APK_FILE" ]; then
+            echo "::error::AAB or APK output was not found."
+            exit 1
+          fi
+
+          cp "$AAB_FILE" release_files/Bank_AlDam_Qataba.aab
+          cp "$APK_FILE" release_files/Bank_AlDam_Qataba.apk
+
+          # Never include signing keys, local environment files, or generated build outputs in the source archive.
+          zip -r release_files/Bank_AlDam_Qataba.zip . \
+            -x "node_modules/*" "dist/*" ".git/*" "android/.gradle/*" \
+               "android/app/build/*" "release_files/*" \
+               "*.jks" "**/*.jks" "*.keystore" "**/*.keystore" \
+               "*.p12" "**/*.p12" "*.pem" "**/*.pem" "*.key" "**/*.key" \
+               ".env" ".env.*" "**/.env" "**/.env.*" "cert_info.txt"
+          zip -j release_files/Bank_AlDam_Qataba.zip \
+            release_files/Bank_AlDam_Qataba.apk \
+            release_files/CERTIFICATE_FINGERPRINTS.txt
+
+      - name: "Upload Google Play AAB"
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bank_AlDam_Qataba_GooglePlay_AAB
+          path: release_files/Bank_AlDam_Qataba.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: "Upload APK"
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bank_AlDam_Qataba_APK
+          path: release_files/Bank_AlDam_Qataba.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: "Upload project ZIP"
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bank_AlDam_Qataba_Project_ZIP
+          path: release_files/Bank_AlDam_Qataba.zip
+          if-no-files-found: error
+          retention-days: 30
