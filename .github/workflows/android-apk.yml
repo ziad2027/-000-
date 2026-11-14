@@ -1,6 +1,10 @@
 name: "Build Android Packages - Bank AlDam Qataba"
 
-"on":
+on:
+  push:
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
