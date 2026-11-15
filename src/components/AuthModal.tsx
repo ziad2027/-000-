@@ -12,11 +12,16 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
-  Heart
+  Heart,
+  Mail,
+  MessageCircle,
+  Phone
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { useAuth } from '../context/AuthContext';
 import { YemenPhoneInput } from './YemenPhoneInput';
+import { openWhatsAppChat } from '../utils/whatsapp';
+import { sanitizePhone } from '../services/phoneVerificationService';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -27,18 +32,23 @@ interface AuthModalProps {
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, isInitialScreen = false }) => {
   const { 
     loginWithPhone, 
+    loginWithEmailPassword,
     registerWithPhone, 
-    resetPasswordDirect, 
+    sendPasswordReset,
     loginWithGoogle,
     continueAsGuest 
   } = useAuth();
 
   const [mode, setMode] = useState<'login' | 'register' | 'forgot'>('login');
+  const [loginMethod, setLoginMethod] = useState<'phone' | 'email'>('phone');
+  const [recoveryMethod, setRecoveryMethod] = useState<'phone' | 'email'>('phone');
   const [phone, setPhone] = useState('');
+  const [emailInput, setEmailInput] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
   const [fullName, setFullName] = useState('');
+  const [recoveryName, setRecoveryName] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -83,7 +93,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, isInitial
     }
   };
 
-  // 1. Direct Login (Phone + Password only)
+  // 1. Direct Login (Phone or Email + Password)
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -91,10 +101,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, isInitial
 
     setLoading(true);
     try {
-      if (!phone) {
-        throw new Error('يرجى إدخال رقم الهاتف');
+      if (loginMethod === 'email') {
+        const cleanEmail = emailInput.trim();
+        if (!cleanEmail) {
+          throw new Error('يرجى إدخال البريد الإلكتروني');
+        }
+        await loginWithEmailPassword(cleanEmail, password);
+      } else {
+        if (!phone) {
+          throw new Error('يرجى إدخال رقم الهاتف');
+        }
+        await loginWithPhone(phone, password);
       }
-      await loginWithPhone(phone, password);
       localStorage.removeItem('has_logged_out');
       onClose();
       handleResetForm();
@@ -181,6 +199,43 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, isInitial
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleEmailPasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setLoading(true);
+    try {
+      await sendPasswordReset(emailInput);
+      setSuccessMsg(`تم إرسال رابط إعادة تعيين كلمة المرور إلى ${emailInput.trim()}. يرجى تفقد صندوق الوارد أو مجلد الرسائل غير المرغوب فيها (Spam).`);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'تعذر إرسال رابط استعادة كلمة المرور.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePhoneWhatsAppRecovery = (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    setSuccessMsg(null);
+
+    const cleanPhone = sanitizePhone(phone);
+    if (!cleanPhone || cleanPhone.length < 7 || cleanPhone.length > 12) {
+      setErrorMsg('يرجى إدخال رقم الهاتف المسجّل في الحساب بشكل صحيح.');
+      return;
+    }
+
+    const msgLines = [
+      'السلام عليكم ورحمة الله وبركاته',
+      'أرجو مساعدتي في استعادة كلمة المرور لحسابي في تطبيق «بنك الدم - قعطبة».',
+      `📱 رقم الهاتف المسجّل: ${cleanPhone}`,
+      recoveryName.trim() ? `👤 الاسم المسجّل: ${recoveryName.trim()}` : '',
+    ].filter(Boolean);
+
+    openWhatsAppChat('773633918', msgLines.join('\n'));
+    setSuccessMsg('تم فتح محادثة واتساب مع إدارة التطبيق للتحقق من ملكية الرقم واستعادة الوصول لحسابك.');
   };
 
   const handleGuest = () => {
@@ -352,19 +407,48 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, isInitial
           </div>
         )}
 
-        {/* 1. LOGIN FORM: Phone + Password matching exact screenshot layout */}
+        {/* 1. LOGIN FORM: Phone or Email + Password */}
         {mode === 'login' && (
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="block text-xs sm:text-sm font-black text-slate-800 mb-1.5 text-right">
-                رقم الهاتف
-              </label>
-              <YemenPhoneInput
-                value={phone}
-                onChange={setPhone}
-                placeholder="773 633 918"
-                required
-              />
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs sm:text-sm font-black text-slate-800 text-right">
+                  {loginMethod === 'phone' ? 'رقم الهاتف' : 'البريد الإلكتروني'}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginMethod(loginMethod === 'phone' ? 'email' : 'phone');
+                    setErrorMsg(null);
+                  }}
+                  className="text-[11px] text-slate-500 hover:text-red-600 font-bold underline-offset-2 hover:underline cursor-pointer"
+                >
+                  {loginMethod === 'phone' ? 'أو الدخول بالبريد الإلكتروني' : 'أو الدخول برقم الهاتف'}
+                </button>
+              </div>
+              {loginMethod === 'phone' ? (
+                <YemenPhoneInput
+                  value={phone}
+                  onChange={setPhone}
+                  placeholder="773 633 918"
+                  required
+                />
+              ) : (
+                <div className="relative flex items-center rounded-2xl border border-slate-200 focus-within:border-red-500 focus-within:ring-2 focus-within:ring-red-100 bg-white overflow-hidden shadow-xs transition-all">
+                  <div className="pr-3.5 text-slate-400 pointer-events-none shrink-0">
+                    <Mail className="w-4 h-4 sm:w-5 sm:h-5 text-slate-400 stroke-[2]" />
+                  </div>
+                  <input
+                    type="email"
+                    value={emailInput}
+                    onChange={(e) => setEmailInput(e.target.value)}
+                    placeholder="example@gmail.com"
+                    dir="ltr"
+                    className="w-full px-3 py-3 text-xs sm:text-sm outline-hidden font-bold text-slate-900 placeholder:text-slate-300 bg-transparent text-left"
+                    required
+                  />
+                </div>
+              )}
             </div>
 
             <div>
@@ -507,37 +591,142 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, isInitial
           </form>
         )}
 
-        {/* Safe account recovery notice: a local captcha cannot prove phone ownership. */}
+        {/* Interactive Password Recovery Flow */}
         {mode === 'forgot' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <span className="text-sm font-black text-slate-900">استعادة الوصول إلى الحساب</span>
+              <span className="text-sm font-black text-slate-900">استعادة كلمة المرور</span>
               <button
                 type="button"
                 onClick={() => {
                   setMode('login');
                   handleResetForm();
                 }}
-                className="text-xs text-red-600 hover:underline font-bold"
+                className="text-xs text-red-600 hover:underline font-bold cursor-pointer"
               >
                 العودة لتسجيل الدخول
               </button>
             </div>
-            <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950 text-xs leading-7 font-bold">
-              اختبار الأرقام المحلي لا يثبت ملكية رقم الهاتف، لذلك أوقفنا إعادة التعيين التي كانت تنشئ حساباً جديداً وقد تفصل بياناتك عن حسابك السابق.
-              <br />
-              للحفاظ على حسابك وسجلات المتبرعين، سجّل الدخول بالبريد المرتبط بالحساب إن كان متاحاً، أو تواصل مع إدارة التطبيق للتحقق من ملكية الرقم قبل استعادة الوصول.
+
+            {/* Method Selector */}
+            <div className="grid grid-cols-2 bg-slate-100 p-1 rounded-xl text-xs font-bold text-slate-600">
+              <button
+                type="button"
+                onClick={() => {
+                  setRecoveryMethod('phone');
+                  setErrorMsg(null);
+                  setSuccessMsg(null);
+                }}
+                className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  recoveryMethod === 'phone'
+                    ? 'bg-white text-red-600 shadow-xs font-black'
+                    : 'hover:text-slate-900'
+                }`}
+              >
+                <Phone className="w-3.5 h-3.5" />
+                <span>برقم الهاتف</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRecoveryMethod('email');
+                  setErrorMsg(null);
+                  setSuccessMsg(null);
+                }}
+                className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  recoveryMethod === 'email'
+                    ? 'bg-white text-red-600 shadow-xs font-black'
+                    : 'hover:text-slate-900'
+                }`}
+              >
+                <Mail className="w-3.5 h-3.5" />
+                <span>بالبريد الإلكتروني</span>
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setMode('login');
-                handleResetForm();
-              }}
-              className="w-full py-3.5 rounded-2xl bg-[#e50914] hover:bg-red-700 text-white font-black text-sm shadow-md transition-all"
-            >
-              فهمت، العودة لتسجيل الدخول
-            </button>
+
+            {recoveryMethod === 'phone' ? (
+              <form onSubmit={handlePhoneWhatsAppRecovery} className="space-y-3.5">
+                <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950 text-[11px] leading-relaxed font-bold">
+                  لحماية حسابك وسجل المتبرعين الخاص بك، يتم التحقق من ملكية رقم الهاتف عبر إدارة التطبيق قبل إعادة ضبط كلمة المرور.
+                  <br />
+                  <span className="text-amber-800">إذا كنت قد ربطت حساب Google سابقاً بحسابك، يمكنك الدخول مباشرة عبر زر Google بالأسفل ثم تعيين كلمة مرور جديدة من ملفك الشخصي.</span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black text-slate-800 mb-1.5 text-right">
+                    رقم الهاتف المسجّل في الحساب
+                  </label>
+                  <YemenPhoneInput
+                    value={phone}
+                    onChange={setPhone}
+                    placeholder="773 633 918"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black text-slate-800 mb-1.5 text-right">
+                    الاسم المسجّل في الحساب (اختياري للمطابقة)
+                  </label>
+                  <input
+                    type="text"
+                    value={recoveryName}
+                    onChange={(e) => setRecoveryName(e.target.value)}
+                    placeholder="أدخل اسمك كما سجلته في التطبيق"
+                    className="w-full px-3.5 py-2.5 rounded-2xl border border-slate-200 focus:border-red-500 focus:ring-2 focus:ring-red-100 text-xs font-bold text-slate-900 placeholder:text-slate-300 outline-hidden text-right"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs sm:text-sm shadow-md shadow-emerald-600/20 transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
+                >
+                  <MessageCircle className="w-4.5 h-4.5" />
+                  <span>طلب استعادة كلمة المرور عبر واتساب الإدارة</span>
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleEmailPasswordReset} className="space-y-3.5">
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-slate-700 text-[11px] leading-relaxed font-bold">
+                  أدخل البريد الإلكتروني المرتبط بحسابك وسيصلك رابط رسمي فوري لإعادة تعيين كلمة المرور مباشرة.
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black text-slate-800 mb-1.5 text-right">
+                    البريد الإلكتروني
+                  </label>
+                  <div className="relative flex items-center rounded-2xl border border-slate-200 focus-within:border-red-500 focus-within:ring-2 focus-within:ring-red-100 bg-white overflow-hidden shadow-xs">
+                    <div className="pr-3.5 text-slate-400 pointer-events-none shrink-0">
+                      <Mail className="w-4 h-4 text-slate-400" />
+                    </div>
+                    <input
+                      type="email"
+                      value={emailInput}
+                      onChange={(e) => setEmailInput(e.target.value)}
+                      placeholder="example@gmail.com"
+                      dir="ltr"
+                      className="w-full px-3 py-3 text-xs sm:text-sm outline-hidden font-bold text-slate-900 placeholder:text-slate-300 bg-transparent text-left"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3.5 rounded-2xl bg-[#e50914] hover:bg-red-700 text-white font-black text-xs sm:text-sm shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer active:scale-[0.98]"
+                >
+                  {loading ? (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <Mail className="w-4 h-4" />
+                      <span>إرسال رابط استعادة كلمة المرور</span>
+                    </>
+                  )}
+                </button>
+              </form>
+            )}
           </div>
         )}
 

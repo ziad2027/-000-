@@ -8,6 +8,9 @@ import {
   createUserWithEmailAndPassword, 
   signInWithPopup,
   signInWithCredential,
+  linkWithPopup,
+  linkWithCredential,
+  sendPasswordResetEmail,
   GoogleAuthProvider,
   signOut, 
   updateProfile,
@@ -42,6 +45,8 @@ interface AuthContextType {
   loginWithEmailPassword: (email: string, pass: string) => Promise<void>;
   registerWithPhone: (phone: string, pass: string, fullName: string) => Promise<void>;
   resetPasswordDirect: (phone: string, newPass: string) => Promise<void>;
+  sendPasswordReset: (email: string) => Promise<void>;
+  linkGoogleAccount: () => Promise<User>;
   loginWithGoogle: () => Promise<User>;
   continueAsGuest: () => void;
   logout: () => Promise<void>;
@@ -389,7 +394,79 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Auth UID and could overwrite the existing phone mapping, causing duplicates.
    */
   const resetPasswordDirect = async (_phone: string, _newPass: string) => {
-    throw new Error('لحماية حسابك وبيانات متبرعيك، أوقفنا الاستعادة التي تنشئ حساباً جديداً. استخدم تسجيل الدخول بالبريد المرتبط بالحساب أو تواصل مع المسؤول لإثبات ملكية رقم الهاتف.');
+    throw new Error('لحماية حسابك وبيانات متبرعيك، أوقفنا الاستعادة التي تنشئ حساباً جديداً. استخدم البريد الإلكتروني أو حساب Google المرتبط أو تواصل مع الإدارة لإثبات ملكية الرقم.');
+  };
+
+  /**
+   * Send official Firebase password reset link to a real email address
+   */
+  const sendPasswordReset = async (email: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      throw new Error('يرجى إدخال بريد إلكتروني صحيح.');
+    }
+    if (cleanEmail.endsWith('@qataba-blood.app')) {
+      throw new Error('هذا المعرّف داخلي لحسابات الهاتف ولا يستقبل رسائل البريد. استخدم الاستعادة عبر واتساب الإدارة أو تسجيل الدخول بحساب Google.');
+    }
+    try {
+      auth.languageCode = 'ar';
+      await sendPasswordResetEmail(auth, cleanEmail);
+    } catch (err: any) {
+      if (err.code === 'auth/user-not-found') {
+        throw new Error('لا يوجد حساب مسجّل بهذا البريد الإلكتروني.');
+      }
+      if (err.code === 'auth/invalid-email') {
+        throw new Error('صيغة البريد الإلكتروني غير صحيحة.');
+      }
+      if (err.code === 'auth/too-many-requests') {
+        throw new Error('تم إرسال عدة طلبات متكررة. يرجى الانتظار بضع دقائق ثم المحاولة مجدداً.');
+      }
+      throw new Error(err.message || 'تعذر إرسال رابط استعادة كلمة المرور حالياً.');
+    }
+  };
+
+  /**
+   * Link a Google account to the currently signed-in phone/email account
+   * so the user can always recover access without losing their UID or donor record.
+   */
+  const linkGoogleAccount = async (): Promise<User> => {
+    if (!auth.currentUser) {
+      throw new Error('يرجى تسجيل الدخول أولاً لربط حساب Google.');
+    }
+    setIsLoading(true);
+    try {
+      let linkedUser: User;
+      if (Capacitor.getPlatform() === 'android') {
+        const nativeResult = await FirebaseAuthentication.signInWithGoogle({
+          skipNativeAuth: true,
+          useCredentialManager: true,
+        });
+        const idToken = nativeResult.credential?.idToken;
+        if (!idToken) {
+          throw new Error('لم يُرجع Google رمز الهوية. تحقق من إعدادات Google Play.');
+        }
+        const googleCredential = GoogleAuthProvider.credential(idToken);
+        const result = await linkWithCredential(auth.currentUser, googleCredential);
+        linkedUser = result.user;
+      } else {
+        const provider = new GoogleAuthProvider();
+        const result = await linkWithPopup(auth.currentUser, provider);
+        linkedUser = result.user;
+      }
+      setCurrentUser(linkedUser);
+      await loadUserProfileSafely(linkedUser);
+      return linkedUser;
+    } catch (err: any) {
+      if (err.code === 'auth/credential-already-in-use') {
+        throw new Error('حساب Google هذا مرتبط بالفعل بحساب آخر في التطبيق.');
+      }
+      if (err.code === 'auth/provider-already-linked') {
+        throw new Error('تم ربط حساب Google بهذا الحساب مسبقاً.');
+      }
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const loginWithGoogle = async (): Promise<User> => {
@@ -550,7 +627,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     // 4. Update Password if provided
-    if (newPassword && newPassword.trim().length >= 6) {
+    if (newPassword && newPassword.trim().length > 0) {
+      if (newPassword.trim().length < 6) {
+        throw new Error('كلمة المرور يجب أن لا تقل عن 6 خانات');
+      }
       try {
         await updatePassword(currentUser, newPassword.trim());
       } catch (passErr: any) {
@@ -586,6 +666,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loginWithEmailPassword,
         registerWithPhone,
         resetPasswordDirect,
+        sendPasswordReset,
+        linkGoogleAccount,
         loginWithGoogle,
         continueAsGuest,
         logout,

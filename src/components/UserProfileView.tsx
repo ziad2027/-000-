@@ -22,7 +22,9 @@ import {
   Settings,
   Mail,
   Info,
-  Heart
+  Heart,
+  ShieldCheck,
+  Link2
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { Donor, UrgentRequest, BLOOD_TYPES, BloodType } from '../types';
@@ -52,7 +54,7 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
   onOpenExitConfirm,
   onSearchWithFilter,
 }) => {
-  const { currentUser, userProfile, isGuest, logout, activeRole, switchActiveRole, updateUserProfileAndAccount } = useAuth();
+  const { currentUser, userProfile, isGuest, logout, activeRole, switchActiveRole, updateUserProfileAndAccount, linkGoogleAccount } = useAuth();
   const [toggleLoading, setToggleLoading] = useState(false);
   const [isRoleModalOpen, setIsRoleModalOpen] = useState(false);
   const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false);
@@ -61,13 +63,14 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
   // Settings / Edit Form Toggle State
   const [showSettings, setShowSettings] = useState(false);
 
-
   // Editable account details states
   const [fullNameInput, setFullNameInput] = useState(userProfile?.displayName || currentUser?.displayName || '');
   const [phoneInput, setPhoneInput] = useState(userProfile?.phone || '');
   const [passwordInput, setPasswordInput] = useState('');
   const [saveLoading, setSaveLoading] = useState(false);
   const [saveResult, setSaveResult] = useState<{ success: boolean; msg: string } | null>(null);
+  const [linkLoading, setLinkLoading] = useState(false);
+  const [linkResult, setLinkResult] = useState<{ success: boolean; msg: string } | null>(null);
 
   // Keep inputs synced when userProfile changes
   React.useEffect(() => {
@@ -77,16 +80,44 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
 
   const handleSaveAccount = async (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedPassword = passwordInput.trim();
+    if (trimmedPassword.length > 0 && trimmedPassword.length < 6) {
+      setSaveResult({ success: false, msg: 'كلمة المرور يجب أن لا تقل عن 6 خانات' });
+      return;
+    }
+
     setSaveLoading(true);
     setSaveResult(null);
     try {
-      await updateUserProfileAndAccount(fullNameInput, phoneInput, passwordInput);
+      await updateUserProfileAndAccount(fullNameInput, phoneInput, trimmedPassword);
       setSaveResult({ success: true, msg: 'تم حفظ وتحديث الاسم والمعلومات بنجاح! ✓' });
       setPasswordInput('');
     } catch (err: any) {
       setSaveResult({ success: false, msg: err.message || 'حدث خطأ أثناء حفظ التعديلات' });
     } finally {
       setSaveLoading(false);
+    }
+  };
+
+  const handleLinkGoogle = async () => {
+    setLinkLoading(true);
+    setLinkResult(null);
+    try {
+      const linked = await linkGoogleAccount();
+      const googleEmail = linked.providerData?.find((p) => p.providerId === 'google.com')?.email || linked.email;
+      setLinkResult({
+        success: true,
+        msg: googleEmail
+          ? `تم ربط حساب Google (${googleEmail}) بنجاح! يمكنك استخدامه دائماً لاستعادة الدخول بضغطة واحدة. ✓`
+          : 'تم ربط حساب Google بنجاح لاستعادة الحساب مستقبلاً! ✓',
+      });
+    } catch (err: any) {
+      const wasCancelled = ['auth/popup-closed-by-user', 'auth/cancelled-popup-request', 'auth/cancelled'].includes(err.code) || /cancelled|canceled/i.test(err.message || '');
+      if (!wasCancelled) {
+        setLinkResult({ success: false, msg: err.message || 'تعذر ربط حساب Google. يرجى المحاولة مجدداً.' });
+      }
+    } finally {
+      setLinkLoading(false);
     }
   };
 
@@ -187,7 +218,15 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
   }
 
   const userDisplayName = userProfile?.displayName || currentUser.displayName || 'فاعل خير';
-  const userPhoneDisplay = userProfile?.phone || currentUser.email?.replace('@qataba-blood.app', '').replace('user_', '') || 'غير مدخل';
+  const userPhoneDisplay =
+    userProfile?.phone ||
+    (currentUser.email?.endsWith('@qataba-blood.app')
+      ? currentUser.email.replace('@qataba-blood.app', '').replace(/^user_(967)?/, '').replace(/_v\d+$/, '')
+      : '') ||
+    'غير مدخل';
+  const googleProviderInfo = currentUser.providerData?.find((p) => p.providerId === 'google.com');
+  const isGoogleLinked = Boolean(googleProviderInfo);
+  const hasRealEmail = Boolean(currentUser.email && !currentUser.email.endsWith('@qataba-blood.app'));
 
   return (
     <div className="space-y-4 max-w-2xl mx-auto text-right">
@@ -357,6 +396,70 @@ export const UserProfileView: React.FC<UserProfileViewProps> = ({
             )}
           </form>
         )}
+
+        {/* Account Security & Recovery Backup (أمان الحساب وطرق الاسترداد) */}
+        <div className="pt-3 border-t border-slate-100 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-xs font-black text-slate-900">أمان الحساب وطرق الاسترداد</h4>
+                <p className="text-[11px] text-slate-500 font-bold">
+                  اربط حساب Google لضمان استعادة حسابك بضغطة واحدة عند نسيان كلمة المرور
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {isGoogleLinked ? (
+            <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-bold flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <div>
+                  <span className="block font-black">مربوط بحساب Google للاستعادة الفورية ✓</span>
+                  {(googleProviderInfo?.email || hasRealEmail) && (
+                    <span className="text-[11px] text-emerald-700 font-mono" dir="ltr">
+                      {googleProviderInfo?.email || currentUser.email}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={handleLinkGoogle}
+              disabled={linkLoading}
+              className="w-full py-2.5 px-4 rounded-2xl bg-slate-50 hover:bg-emerald-50 border border-slate-200 hover:border-emerald-300 text-slate-800 hover:text-emerald-900 font-black text-xs transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+            >
+              {linkLoading ? (
+                <div className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <>
+                  <Link2 className="w-4 h-4 text-emerald-600" />
+                  <span>ربط حساب Google الآن (لاستعادة الحساب بضغطة واحدة)</span>
+                </>
+              )}
+            </button>
+          )}
+
+          {hasRealEmail && (
+            <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-700 font-bold flex items-center justify-between gap-2">
+              <span>البريد الإلكتروني المؤهّل للاستعادة الرسمية:</span>
+              <span className="font-mono text-slate-900" dir="ltr">{currentUser.email}</span>
+            </div>
+          )}
+
+          {linkResult && (
+            <div className={`p-3 rounded-2xl text-xs font-bold ${
+              linkResult.success ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-800 border border-red-200'
+            }`}>
+              {linkResult.msg}
+            </div>
+          )}
+        </div>
 
         {/* Admin Switcher inside Settings if Admin */}
         {userProfile?.role === 'admin' && (
